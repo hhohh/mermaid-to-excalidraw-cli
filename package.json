@@ -1,0 +1,25 @@
+{
+  "name": "mermaid-to-excalidraw-cli",
+  "version": "1.0.0",
+  "description": "CLI tool to convert Mermaid diagrams to Excalidraw format",
+  "type": "module",
+  "bin": {
+    "mer2excal": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@excalidraw/mermaid-to-excalidraw": "^2.1.1",
+    "jsdom": "^24.0.0"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^20",
+    "typescript": "^5.2.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
