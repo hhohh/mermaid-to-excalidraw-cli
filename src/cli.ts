@@ -243,7 +243,18 @@ function nextSeed(): number {
  * Convert HTML <br> to newline, strip other simple HTML tags.
  */
 function sanitizeLabelText(text: string): string {
-  return text.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+(>|$)/g, "");
+  return text
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?[^>]+(>|$)/g, "")
+    // Strip Markdown: **bold**, *italic*, __bold__, _italic_, ~~strikethrough~~, `code`
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/_(.+?)_/g, "$1")
+    .replace(/~~(.+?)~~/g, "$1")
+    .replace(/`(.+?)`/g, "$1")
+    // Strip link syntax: [text](url) → text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
 }
 
 /**
