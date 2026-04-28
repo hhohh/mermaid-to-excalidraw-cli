@@ -93,6 +93,33 @@ mer2excal [input.mmd] [options]
   -h, --help                 显示帮助
 ```
 
+## 自动布局
+
+基于 **ELK (Eclipse Layout Kernel)** 风格的分层布局算法，自动对转换后的节点进行定位：
+
+- **方向检测**：自动解析 Mermaid 定义中的 `flowchart LR` / `TD` / `RL` / `BT` 决定布局方向
+- **拓扑分层**：BFS 拓扑排序为节点分配层级（源 → 目标）
+- **间距控制**：
+  - 同层相邻节点间距：100px
+  - 层与层间距：100px
+- **箭头自动连接**：通过 `intersectElementWithLine` 精确计算箭头与矩形各边的交点，箭头始终连接在节点边缘
+
+## 文字处理
+
+自动剥离标签文本中的 Markdown 语法标记，保留纯文本内容：
+
+| 语法 | 处理方式 | 示例 |
+|------|---------|------|
+| `**bold**` | → `bold` | `**1,053,877**` → `1,053,877` |
+| `*italic*` | → `italic` | |
+| `__text__` | → `text` | |
+| `_text_` | → `text` | |
+| `~~strike~~` | → `strike` | |
+| `` `code` `` | → `code` | |
+| `[text](url)` | → `text` | |
+
+HTML 标签（如 `<br>`）被转换为换行符，其余标签被剥离。
+
 ## 输出格式
 
 ### `excalidraw`（默认）
@@ -129,7 +156,7 @@ tags: [excalidraw]
 %%
 ```
 
-在 **Obsidian** 中打开后，切换至 Excalidraw 视图即可编辑。
+在 **Obsidian** 中打开后，切换至 Excalidraw 视图即可编辑。拖拽节点时，连接线会自动跟随。
 
 ## 支持的图表类型
 
@@ -149,9 +176,11 @@ tags: [excalidraw]
 1. **jsdom** 模拟浏览器 DOM 环境（`pretendToBeVisual: true`）
 2. 加载 **mermaid** 库在虚拟 DOM 中解析和渲染图表
 3. **@excalidraw/mermaid-to-excalidraw** 从渲染结果提取元素
-4. **mer2excal** 补充 Excalidraw 元素必填字段（`strokeColor`、`seed`、`versionNonce`、`boundElements` 等）
+4. **mer2excal** 补充 Excalidraw 元素必填字段（`strokeColor`、`seed`、`versionNonce` 等）
 5. 标签文字从容器内联属性拆分为独立 Text 元素，绑定到容器
-6. 输出为标准 Excalidraw JSON 或 Obsidian 兼容的 `.excalidraw.md`
+6. 自动布局：ELK 风格分层算法定位节点、计算箭头端点
+7. 剥离 Markdown 语法标记，保留纯文本
+8. 输出为标准 Excalidraw JSON 或 Obsidian 兼容的 `.excalidraw.md`
 
 ## 项目结构
 
