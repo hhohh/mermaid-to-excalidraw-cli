@@ -1,0 +1,6 @@
+flowchart TD
+subgraph 标签2: social_prospect_cn
+        A2[读取CIM account表] --> B2[判断: 是否仅有SIDL account<br>（无其他渠道账号）?]
+        B2 -->|是| C2[标签置为 TRUE]
+        B2 -->|否| D2[标签保持为空]
+    end

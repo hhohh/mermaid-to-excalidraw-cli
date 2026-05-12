@@ -1,0 +1,26 @@
+diff --git a/node_modules/@excalidraw/mermaid-to-excalidraw/dist/parser/flowchart.js b/node_modules/@excalidraw/mermaid-to-excalidraw/dist/parser/flowchart.js
+index 5713001..36b3bb6 100644
+--- a/node_modules/@excalidraw/mermaid-to-excalidraw/dist/parser/flowchart.js
++++ b/node_modules/@excalidraw/mermaid-to-excalidraw/dist/parser/flowchart.js
+@@ -104,7 +104,20 @@ const parseSubGraph = (data, containerEl, classes) => {
+         return n;
+     });
+     // Get position
+-    const el = containerEl.querySelector(`[id='${data.id}']`);
++    let el = containerEl.querySelector(`[id='${data.id}']`);
++    if (!el) {
++        el = containerEl.querySelector(`[id*='${data.id}']`);
++    }
++    if (!el) {
++        const clusters = containerEl.querySelectorAll('.cluster');
++        for (const cluster of clusters) {
++            const labelEl = cluster.querySelector('.cluster-label text, .cluster-label tspan, text');
++            if (labelEl && labelEl.textContent?.trim() === data.title) {
++                el = cluster;
++                break;
++            }
++        }
++    }
+     if (!el) {
+         throw new Error("SubGraph element not found");
+     }

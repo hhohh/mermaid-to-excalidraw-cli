@@ -1,0 +1,10 @@
+flowchart TD
+    A[开始：SIDL历史数据初始化] --> B[确定初始化客户清单<br>比对 ODS SIDL 与 CIM ACCOUNT<br>**1,054,040**]
+    B --> C[MDM数据探查<br>筛选目标人群，确认覆盖量<br>**1,053,877**,未匹配到：**163** ]
+    C --> D[按CIM表结构组装数据]
+    D --> E{判断CIM中是否存在GCID?}
+    E -->|存在GCID但缺失SIDL Account<br>**247**<br>有62个MDM历史未推送过| F[**MDM重推这部分gcid**]
+    E -->|缺失GCID<br>**1,053,630**| G[写入全套CIM数据]
+    F --> H[数据检查]
+    G --> H
+    H --> I[初始化完成]

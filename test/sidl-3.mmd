@@ -1,0 +1,7 @@
+flowchart TD
+    subgraph 标签1: sidl_not_init_cn
+        A1[MDM生成历史输出GCID状态表] --> B1[CDP ODS层接收该表]
+        B1 --> C1[判断: 未被MDM输出过<br>且有SIDL account?]
+        C1 -->|是| D1[标签置为 TRUE]
+        C1 -->|否| E1[标签保持为空]
+    end
