@@ -5,6 +5,4 @@ dist/
 mer2excal
 mer2excal-darwin-*
 .claude/
-test/*.excalidraw
-test/*.excalidraw.md
-test/SIDL*/
+test/
