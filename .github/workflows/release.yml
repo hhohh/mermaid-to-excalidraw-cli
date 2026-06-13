@@ -26,10 +26,10 @@ jobs:
         env:
           NODE_ENV: development
 
-      - run: npm run build
+      - run: npm run bundle
 
       - name: Compile standalone binary
-        run: bun build --compile ./src/cli.ts --outfile=mer2excal-darwin-${{ matrix.arch }}
+        run: bun build dist/cli.bundle.js --compile --outfile=mer2excal-darwin-${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
