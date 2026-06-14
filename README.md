@@ -76,18 +76,52 @@ mer2excal -d "graph TD; A[开始] --> B{判断}; B -->|是| C[结束]" --png
 
 ### Markdown 批量转换（.md）
 
+当输入文件是 Markdown 格式时，工具会自动提取所有 ` ```mermaid ` 代码块，并为每个代码块生成独立的输出文件。
+
 ```bash
-# 自动提取文档中所有 ```mermaid 代码块，按顺序输出
+# 导出为 PNG
 mer2excal doc.md --png
 
-# 输出结构: 原文件名（去后缀）为目录，内部按序号排列
-# doc/
-# ├── 001.png
-# ├── 002.png
-# └── 003.png
+# 导出为 SVG
+mer2excal doc.md --svg
+
+# 导出为 Excalidraw JSON
+mer2excal doc.md
 ```
 
-Markdown 文件中可以有任意数量的 mermaid 代码块，也可以穿插非 mermaid 代码块（会被忽略）。每个 mermaid 代码块独立转换为一个文件。
+**输出规则：**
+- 自动创建以 Markdown 文件名命名的目录（去掉 `.md` 后缀）
+- 每个 mermaid 代码块按顺序编号输出（001、002、003...）
+- 非 mermaid 代码块会被自动忽略
+
+**输出示例：**
+
+```bash
+# 输入：doc.md（包含 3 个 mermaid 代码块）
+mer2excal doc.md --png
+
+# 输出：
+doc/
+├── 001.png
+├── 002.png
+└── 003.png
+
+# 导出为 Excalidraw 格式
+mer2excal doc.md
+
+doc/
+├── 001.excalidraw
+├── 002.excalidraw
+└── 003.excalidraw
+
+# 导出为 SVG 格式
+mer2excal doc.md --svg
+
+doc/
+├── 001.svg
+├── 002.svg
+└── 003.svg
+```
 
 ### 字体设置
 
