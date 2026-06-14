@@ -663,8 +663,14 @@ function layeredLayout(elements: any[], definition: string): void {
   if (queue.length === 0 && nodes.length > 0) {
     layerOf.set(nodes[0].id, 0); queue.push(nodes[0].id);
   }
+  // Track how many times each node has been processed to prevent infinite loops in cyclic graphs
+  const processCount = new Map<string, number>();
+  const maxProcessPerNode = nodes.length + 1; // Allow each node to be processed at most N+1 times
   while (queue.length > 0) {
     const id = queue.shift()!;
+    const count = (processCount.get(id) ?? 0) + 1;
+    processCount.set(id, count);
+    if (count > maxProcessPerNode) continue; // Skip if node has been processed too many times (cycle detected)
     for (const tid of outEdges.get(id) ?? []) {
       const nl = (layerOf.get(id) ?? 0) + 1;
       if (!layerOf.has(tid) || (layerOf.get(tid) ?? 0) < nl) {
