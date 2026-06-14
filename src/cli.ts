@@ -46,6 +46,39 @@ function setupBrowserEnvironment(): void {
   globalThis.MouseEvent = win.MouseEvent;
   globalThis.KeyboardEvent = win.KeyboardEvent;
 
+  // FontFace polyfill for @excalidraw/utils
+  if (typeof globalThis.FontFace === "undefined") {
+    globalThis.FontFace = class FontFace {
+      family: string;
+      source: string;
+      descriptors: any;
+      status: string = "loaded";
+      loaded: Promise<any>;
+      unicodeRange: string = "U+0-10FFFF";
+      constructor(family: string, source: string, descriptors?: any) {
+        this.family = family;
+        this.source = source;
+        this.descriptors = descriptors;
+        if (descriptors?.unicodeRange) {
+          this.unicodeRange = descriptors.unicodeRange;
+        }
+        this.loaded = Promise.resolve(this);
+      }
+      load(): Promise<FontFace> { return Promise.resolve(this); }
+    } as any;
+  }
+
+  // document.fonts polyfill
+  if (typeof document !== "undefined" && !(document as any).fonts) {
+    (document as any).fonts = {
+      add: () => {},
+      check: () => true,
+      load: () => Promise.resolve([]),
+      ready: Promise.resolve([]),
+      forEach: () => {},
+    };
+  }
+
   // SVG methods jsdom doesn't implement — needed by mermaid
   if (typeof SVGElement !== "undefined") {
     if (!(SVGElement.prototype as any).getBBox) {
@@ -221,7 +254,7 @@ import { fileURLToPath } from "node:url";
 
 // ── Types ──────────────────────────────────────────────
 
-type OutputFormat = "excalidraw" | "excalidraw-md";
+type OutputFormat = "excalidraw" | "excalidraw-md" | "png";
 
 type ExcalidrawFontFamily = number | string; // 1/2/3 or local font name
 
@@ -854,10 +887,12 @@ function parseArgs(): CliOptions {
       case "-v": case "--version": opts.showVersion = true; break;
       case "-p": case "--pretty": opts.pretty = true; break;
       case "--md": opts.format = "excalidraw-md"; break;
+      case "--png": opts.format = "png"; break;
       case "-t": case "--format": {
         const val = argv[++i];
         if (val === "md" || val === "excalidraw-md") opts.format = "excalidraw-md";
         else if (val === "excalidraw") opts.format = "excalidraw";
+        else if (val === "png") opts.format = "png";
         else { console.error(`Unknown format: ${val}`); process.exit(1); }
         break;
       }
@@ -897,7 +932,9 @@ async function readInput(opts: CliOptions): Promise<string> {
 function guessOutputPath(inputFile?: string, format?: OutputFormat): string | undefined {
   if (!inputFile) return undefined;
   const p = path.parse(inputFile);
-  const ext = format === "excalidraw-md" ? ".excalidraw.md" : ".excalidraw";
+  let ext = ".excalidraw";
+  if (format === "excalidraw-md") ext = ".excalidraw.md";
+  else if (format === "png") ext = ".png";
   return path.join(p.dir, `${p.name}${ext}`);
 }
 
@@ -922,12 +959,52 @@ function extractMermaidBlocks(content: string): string[] {
 async function convertSingleDiagram(
   definition: string,
   parseMermaidToExcalidraw: any,
+  exportToSvg: any,
   opts: CliOptions,
   outPath?: string,
 ): Promise<void> {
   const result = await parseMermaidToExcalidraw(definition, {
     themeVariables: { fontSize: `${opts.fontSize}px` },
   });
+
+  if (opts.format === "png") {
+    const excalidrawData = buildExcalidrawJson(result.elements, result.files, opts.fontFamily, definition);
+    const svgElement = await exportToSvg(excalidrawData);
+    let svgString = new XMLSerializer().serializeToString(svgElement);
+    
+    // 修复重复的 xmlns 属性
+    const xmlnsMatches = svgString.match(/xmlns="[^"]*"/g);
+    if (xmlnsMatches && xmlnsMatches.length > 1) {
+      const seen = new Set<string>();
+      svgString = svgString.replace(/xmlns="[^"]*"/g, (match) => {
+        if (seen.has(match)) return "";
+        seen.add(match);
+        return match;
+      });
+    }
+    
+    // 使用 @resvg/resvg-wasm 转换为 PNG
+    const { Resvg, initWasm } = await import("@resvg/resvg-wasm");
+    // 初始化 WASM（从内置的 wasm 二进制加载）
+    const wasmUrl = "https://cdn.jsdelivr.net/npm/@resvg/resvg-wasm@2.6.2/index_bg.wasm";
+    const wasmResponse = await fetch(wasmUrl);
+    const wasmBytes = await wasmResponse.arrayBuffer();
+    await initWasm(wasmBytes);
+    
+    const resvg = new Resvg(svgString, {
+      fitTo: { mode: "original" },
+    });
+    const pngData = resvg.render();
+    const pngBuffer = pngData.asPng();
+    
+    if (outPath) {
+      fs.writeFileSync(outPath, pngBuffer);
+      console.error(`✓ Written to ${outPath}`);
+    } else {
+      process.stdout.write(pngBuffer);
+    }
+    return;
+  }
 
   if (opts.format === "excalidraw-md") {
     const content = buildExcalidrawMdContent(result.elements, result.files, opts.fontFamily, opts.pretty, definition);
@@ -952,6 +1029,7 @@ async function convertSingleDiagram(
 async function convertMarkdownFile(
   inputFile: string,
   parseMermaidToExcalidraw: any,
+  exportToSvg: any,
   opts: CliOptions,
 ): Promise<void> {
   const content = fs.readFileSync(inputFile, "utf-8");
@@ -966,11 +1044,12 @@ async function convertMarkdownFile(
   const outDir = path.join(p.dir, p.name);
   fs.mkdirSync(outDir, { recursive: true });
 
+  const ext = opts.format === "png" ? ".png" : ".excalidraw";
   for (let i = 0; i < blocks.length; i++) {
     const num = String(i + 1).padStart(3, "0");
-    const outPath = path.join(outDir, `${num}.excalidraw`);
+    const outPath = path.join(outDir, `${num}${ext}`);
     console.error(`[${i + 1}/${blocks.length}] Converting block ${num}...`);
-    await convertSingleDiagram(blocks[i], parseMermaidToExcalidraw, opts, outPath);
+    await convertSingleDiagram(blocks[i], parseMermaidToExcalidraw, exportToSvg, opts, outPath);
   }
   console.error(`✓ ${blocks.length} diagram(s) written to ${outDir}/`);
 }
@@ -993,12 +1072,14 @@ async function main(): Promise<void> {
   // 1. jsdom
   setupBrowserEnvironment();
 
-  // 2. Dynamic import
+  // 2. Dynamic import (after jsdom setup for browser API compatibility)
   const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
+  const excalidrawUtils = await import("@excalidraw/utils") as any;
+  const exportToSvg = excalidrawUtils.exportToSvg;
 
   // 3. Handle markdown input
   if (opts.inputFile && isMarkdownFile(opts.inputFile)) {
-    await convertMarkdownFile(opts.inputFile, parseMermaidToExcalidraw, opts);
+    await convertMarkdownFile(opts.inputFile, parseMermaidToExcalidraw, exportToSvg, opts);
     return;
   }
 
@@ -1008,7 +1089,7 @@ async function main(): Promise<void> {
 
   // 5. Convert & write
   const outPath = opts.outputFile || guessOutputPath(opts.inputFile, opts.format);
-  await convertSingleDiagram(definition, parseMermaidToExcalidraw, opts, outPath);
+  await convertSingleDiagram(definition, parseMermaidToExcalidraw, exportToSvg, opts, outPath);
 }
 
 main().catch((err) => {
