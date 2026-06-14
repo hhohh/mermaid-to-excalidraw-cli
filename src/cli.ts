@@ -52,8 +52,22 @@ function setupBrowserEnvironment(): void {
       (SVGElement.prototype as any).getBBox = function () {
         const tag = this.tagName?.toLowerCase();
         const attr = (n: string) => parseFloat(this.getAttribute?.(n) || "");
-        if (["rect", "foreignobject", "image"].includes(tag)) {
+        if (["rect", "image"].includes(tag)) {
           return { x: attr("x"), y: attr("y"), width: attr("width") || 100, height: attr("height") || 50 };
+        }
+        if (tag === "foreignobject") {
+          const w = attr("width"); const h = attr("height");
+          if (w && h) return { x: attr("x"), y: attr("y"), width: w, height: h };
+          // Try to estimate size from HTML content inside foreignObject
+          const div = this.querySelector?.("div, span, p");
+          if (div) {
+            const text = div.textContent || "";
+            const lines = text.split("\n").length || 1;
+            const estW = Math.max(text.length * 8, 40);
+            const estH = Math.max(lines * 20, 20);
+            return { x: attr("x"), y: attr("y"), width: estW, height: estH };
+          }
+          return { x: attr("x"), y: attr("y"), width: 0, height: 0 };
         }
         if (tag === "circle") {
           const r = attr("r") || 50; const cx = attr("cx") || 50; const cy = attr("cy") || 50;
@@ -82,7 +96,7 @@ function setupBrowserEnvironment(): void {
           }
         }
         if (Number.isFinite(minX)) return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-        return { x: 0, y: 0, width: 100, height: 50 };
+        return { x: 0, y: 0, width: 0, height: 0 };
       };
     }
     if (!(SVGElement.prototype as any).getBoundingClientRect) {
@@ -391,9 +405,27 @@ function normalizeElements(
       n.width = neededW;
       n.height = neededH;
 
-      // Center the text on the (possibly expanded) container.
+      // Check if this is a subgraph element
+      const isSubgraph = el.groupIds?.some((gid: string) => {
+        const m = gid.match(/^subgraph_group_(.+)$/);
+        return m && m[1] === el.id;
+      }) ?? false;
+
+      // Position text: top-aligned for subgraphs, centered for others
       const cx = n.x + n.width / 2;
-      const cy = n.y + n.height / 2;
+      let cy: number;
+      let verticalAlign: string;
+      
+      if (isSubgraph) {
+        // Top-align with small padding
+        const TOP_PADDING = 8;
+        cy = n.y + TOP_PADDING + textHeight / 2;
+        verticalAlign = "top";
+      } else {
+        // Center-align
+        cy = n.y + n.height / 2;
+        verticalAlign = "middle";
+      }
 
       const txt: any = {
         id: `${el.id}_text`,
@@ -422,9 +454,9 @@ function normalizeElements(
         locked: false,
         text,
         fontSize,
-        fontFamily: el.label.fontFamily ?? fontFamily,
+        fontFamily: el.label.fontFamily ?? 5,
         textAlign: "center",
-        verticalAlign: "middle",
+        verticalAlign,
         baseline: 13,
         containerId: el.id,
         originalText: text,
@@ -504,6 +536,7 @@ function intersectElementWithLine(
 function layeredLayout(elements: any[], definition: string): void {
   const NODE_SPACING = 100;
   const LAYER_GAP = 100;
+  const SUBGRAPH_PADDING = 30;
 
   const direction = parseMermaidDirection(definition);
   const isHorizontal = direction === "RIGHT" || direction === "LEFT";
@@ -512,9 +545,43 @@ function layeredLayout(elements: any[], definition: string): void {
   const byId = new Map<string, any>();
   for (const el of elements) byId.set(el.id, el);
 
+  // ── 0. Identify subgraph rectangles ──
+  // Subgraph rectangles have groupIds containing "subgraph_group_<ID>"
+  // and their id matches the <ID> part.
+  const subgraphIds = new Set<string>();
+  const subgraphChildren = new Map<string, string[]>();
+  for (const el of elements) {
+    if (el.type === "rectangle" && el.groupIds?.length > 0) {
+      for (const gid of el.groupIds) {
+        const m = gid.match(/^subgraph_group_(.+)$/);
+        if (m && m[1] === el.id) {
+          subgraphIds.add(el.id);
+          break;
+        }
+      }
+    }
+  }
+  // Build subgraph -> children mapping
+  for (const el of elements) {
+    if (el.type === "rectangle" && !subgraphIds.has(el.id) && el.groupIds?.length > 0) {
+      for (const gid of el.groupIds) {
+        const m = gid.match(/^subgraph_group_(.+)$/);
+        if (m) {
+          const sgId = m[1];
+          if (subgraphIds.has(sgId)) {
+            if (!subgraphChildren.has(sgId)) subgraphChildren.set(sgId, []);
+            subgraphChildren.get(sgId)!.push(el.id);
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // ── 1. Collect nodes (containers) and edges (arrows) ──
+  // Exclude subgraph rectangles from independent positioning
   const nodes = elements.filter(
-    (el) => el.type !== "arrow" && el.type !== "line" && !(el.type === "text" && el.containerId),
+    (el) => el.type !== "arrow" && el.type !== "line" && !(el.type === "text" && el.containerId) && !subgraphIds.has(el.id),
   );
   const edges = elements.filter(
     (el) => (el.type === "arrow" || el.type === "line") && el.start?.id && el.end?.id,
@@ -556,20 +623,14 @@ function layeredLayout(elements: any[], definition: string): void {
   for (const n of nodes) layers[layerOf.get(n.id) ?? 0].push(n);
 
   // ── 4. Position nodes ──
-  // For each layer: stack nodes along the secondary axis,
-  // then place the layer along the primary axis.
-
-  // Sort each layer by original Mermaid y (keep locality)
   for (const layer of layers) layer.sort((a: any, b: any) => (a.y ?? 0) - (b.y ?? 0));
 
   let primaryPos = 0;
 
   for (const layer of layers) {
-    // ---- compute total span of this layer on the secondary axis ----
     const secDims = layer.map((n: any) => (isHorizontal ? n.height : n.width));
     const totalSec = secDims.reduce((s: number, d: number) => s + d, 0) + NODE_SPACING * (layer.length - 1);
 
-    // Place nodes vertically (LR) or horizontally (TD) centred around 0
     let secPos = -totalSec / 2;
 
     for (const node of layer) {
@@ -582,7 +643,6 @@ function layeredLayout(elements: any[], definition: string): void {
       secPos += d + NODE_SPACING;
     }
 
-    // Set primary coordinate for every node in the layer
     for (const node of layer) {
       if (isHorizontal) {
         node.x = primaryPos;
@@ -591,7 +651,6 @@ function layeredLayout(elements: any[], definition: string): void {
       }
     }
 
-    // Advance primary position for next layer
     const maxPri = Math.max(...layer.map((n: any) => (isHorizontal ? n.width : n.height)), 0);
     primaryPos += maxPri + LAYER_GAP;
   }
@@ -606,15 +665,49 @@ function layeredLayout(elements: any[], definition: string): void {
   const offY = 8 - minY;
   for (const n of nodes) { n.x += offX; n.y += offY; }
 
+  // ── 5b. Position subgraph rectangles to wrap their children ──
+  for (const sgId of subgraphIds) {
+    const sgEl = byId.get(sgId);
+    if (!sgEl) continue;
+    const childIds = subgraphChildren.get(sgId) ?? [];
+    if (childIds.length === 0) continue;
+
+    let childMinX = Infinity, childMinY = Infinity;
+    let childMaxX = -Infinity, childMaxY = -Infinity;
+    for (const cid of childIds) {
+      const child = byId.get(cid);
+      if (!child) continue;
+      childMinX = Math.min(childMinX, child.x);
+      childMinY = Math.min(childMinY, child.y);
+      childMaxX = Math.max(childMaxX, child.x + child.width);
+      childMaxY = Math.max(childMaxY, child.y + child.height);
+    }
+
+    const LABEL_HEIGHT = 25;
+    sgEl.x = childMinX - SUBGRAPH_PADDING;
+    sgEl.y = childMinY - SUBGRAPH_PADDING - LABEL_HEIGHT;
+    sgEl.width = (childMaxX - childMinX) + SUBGRAPH_PADDING * 2;
+    sgEl.height = (childMaxY - childMinY) + SUBGRAPH_PADDING * 2 + LABEL_HEIGHT;
+  }
+
   // ── 6. Sync text positions ──
-  for (const node of nodes) {
+  const allPositioned = elements.filter(
+    (el) => el.type !== "arrow" && el.type !== "line" && !(el.type === "text" && el.containerId),
+  );
+  for (const node of allPositioned) {
     if (!node.boundElements) continue;
     for (const be of node.boundElements) {
       if (be.type === "text") {
         const te = byId.get(be.id);
         if (te) {
           te.x = node.x + node.width / 2 - te.width / 2;
-          te.y = node.y + node.height / 2 - te.height / 2;
+          // Subgraph labels: top-aligned; others: centered
+          if (subgraphIds.has(node.id)) {
+            const TOP_PADDING = 8;
+            te.y = node.y + TOP_PADDING;
+          } else {
+            te.y = node.y + node.height / 2 - te.height / 2;
+          }
         }
       }
     }
@@ -632,11 +725,9 @@ function layeredLayout(elements: any[], definition: string): void {
     const eCX = endEl.x + endEl.width / 2;
     const eCY = endEl.y + endEl.height / 2;
 
-    // Start point: line from end centre → start centre intersected with startEl
     const si = intersectElementWithLine(startEl, [eCX, eCY], [sCX, sCY], GAP);
     if (si) { arrow.x = si[0]; arrow.y = si[1]; }
 
-    // End point: line from arrow origin → end centre intersected with endEl
     const ei = intersectElementWithLine(endEl, [arrow.x, arrow.y], [eCX, eCY], GAP);
     if (ei) {
       arrow.points = [[0, 0], [ei[0] - arrow.x, ei[1] - arrow.y]];
@@ -678,7 +769,7 @@ function buildExcalidrawJson(
     files: files ?? {},
     appState: {
       ...DEFAULT_APP_STATE,
-      currentItemFontFamily: typeof fontFamily === "number" ? fontFamily : 1,
+      currentItemFontFamily: typeof fontFamily === "number" ? fontFamily : 5,
     },
   };
 }
@@ -748,7 +839,7 @@ function parseArgs(): CliOptions {
   const argv = process.argv;
   const opts: CliOptions = {
     fontSize: 20,
-    fontFamily: 1,
+    fontFamily: 5,
     format: "excalidraw",
     pretty: false,
     help: false,
