@@ -4,38 +4,13 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag (e.g., v1.0.0)'
-        required: true
-        type: string
 
 permissions:
   contents: write
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            arch: arm64
-            target: bun-darwin-aarch64
-            output: mer2excal-darwin-arm64
-          - os: macos-13
-            arch: x64
-            target: bun-darwin-x64
-            output: mer2excal-darwin-x64
-          - os: windows-latest
-            arch: x64
-            target: bun-windows-x64
-            output: mer2excal-windows-x64.exe
-          - os: ubuntu-latest
-            arch: x64
-            target: bun-linux-x64
-            output: mer2excal-linux-x64
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -43,58 +18,27 @@ jobs:
         with:
           bun-version: latest
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install dependencies
-        run: bun install
-        env:
-          NODE_ENV: development
+        run: npm ci
 
-      - name: Embed font and build
-        run: npm run embed-font
-
-      - name: Bundle
+      - name: Build bundle
         run: npm run bundle
 
-      - name: Compile standalone binary
-        run: bun build dist/cli.bundle.js --compile --target=${{ matrix.target }} --outfile=${{ matrix.output }}
-
-      - name: Verify binary
+      - name: Build executables
         run: |
-          ls -lh ${{ matrix.output }}
-          file ${{ matrix.output }} || echo "file command not available"
-        shell: bash
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.output }}
-          path: ${{ matrix.output }}
-          retention-days: 7
-
-      - name: Upload to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ matrix.output }}
-          generate_release_notes: true
-
-  create-release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+          bun build dist/cli.bundle.js --compile --target=bun-darwin-arm64 --outfile=mer2excal-darwin-arm64
+          bun build dist/cli.bundle.js --compile --target=bun-darwin-x64 --outfile=mer2excal-darwin-x64
+          bun build dist/cli.bundle.js --compile --target=bun-windows-x64 --outfile=mer2excal-windows-x64.exe
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
-          name: Release ${{ inputs.tag }}
-          generate_release_notes: true
           files: |
-            artifacts/**/*
+            mer2excal-darwin-arm64
+            mer2excal-darwin-x64
+            mer2excal-windows-x64.exe
+          generate_release_notes: true
