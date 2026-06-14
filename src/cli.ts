@@ -590,35 +590,141 @@ function intersectElementWithLine(
   return [candidates[0].x, candidates[0].y];
 }
 
-function layeredLayout(elements: any[], definition: string): void {
-  const NODE_SPACING = 100;
-  const LAYER_GAP = 100;
-  const SUBGRAPH_PADDING = 30;
+function parseSubgraphDirection(sgId: string, definition: string): "RIGHT" | "LEFT" | "DOWN" | "UP" {
+  // Find the subgraph block and look for a direction statement inside it
+  const escaped = sgId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sgRegex = new RegExp(`subgraph\\s+${escaped}[\\s\\S]*?end`, "i");
+  const sgBlock = definition.match(sgRegex);
+  if (sgBlock) {
+    const dirMatch = sgBlock[0].match(/direction\s+(LR|RL|TD|TB|BT)/i);
+    if (dirMatch) {
+      switch (dirMatch[1].toUpperCase()) {
+        case "LR": return "RIGHT";
+        case "RL": return "LEFT";
+        case "TD": case "TB": return "DOWN";
+        case "BT": return "UP";
+      }
+    }
+  }
+  // Default: inherit main direction or RIGHT
+  try { return parseMermaidDirection(definition); } catch { return "RIGHT"; }
+}
 
-  const direction = parseMermaidDirection(definition);
+/**
+ * Layout a group of nodes (e.g. children within a subgraph) using
+ * a simple layered approach.  Nodes are positioned in‑place.
+ */
+function layoutNodeGroup(
+  nodes: any[],
+  edges: any[],
+  direction: "RIGHT" | "LEFT" | "DOWN" | "UP",
+  nodeSpacing: number,
+  layerGap: number,
+  originPad: number,
+): void {
+  if (nodes.length === 0) return;
+
   const isHorizontal = direction === "RIGHT" || direction === "LEFT";
-  const isForward = direction === "RIGHT" || direction === "DOWN";
+
+  // Build adjacency
+  const nodeIdSet = new Set(nodes.map((n: any) => n.id));
+  const outAdj = new Map<string, string[]>();
+  const inDeg = new Map<string, number>();
+  for (const n of nodes) { outAdj.set(n.id, []); inDeg.set(n.id, 0); }
+  for (const e of edges) {
+    if (!nodeIdSet.has(e.start?.id) || !nodeIdSet.has(e.end?.id)) continue;
+    outAdj.get(e.start.id)!.push(e.end.id);
+    inDeg.set(e.end.id, (inDeg.get(e.end.id) ?? 0) + 1);
+  }
+
+  // Topological BFS → layer assignment
+  const layerOf = new Map<string, number>();
+  const queue: string[] = [];
+  for (const [id, deg] of inDeg) {
+    if (deg === 0) { layerOf.set(id, 0); queue.push(id); }
+  }
+  if (queue.length === 0) { layerOf.set(nodes[0].id, 0); queue.push(nodes[0].id); }
+
+  const procCount = new Map<string, number>();
+  const maxProc = nodes.length + 1;
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const c = (procCount.get(id) ?? 0) + 1;
+    procCount.set(id, c);
+    if (c > maxProc) continue;
+    for (const tid of outAdj.get(id) ?? []) {
+      const nl = (layerOf.get(id) ?? 0) + 1;
+      if (!layerOf.has(tid) || (layerOf.get(tid) ?? 0) < nl) {
+        layerOf.set(tid, nl);
+        if (!queue.includes(tid)) queue.push(tid);
+      }
+    }
+  }
+  for (const n of nodes) { if (!layerOf.has(n.id)) layerOf.set(n.id, 0); }
+
+  const maxLayer = Math.max(...layerOf.values(), 0);
+  const layers: any[][] = Array.from({ length: maxLayer + 1 }, () => []);
+  for (const n of nodes) layers[layerOf.get(n.id) ?? 0].push(n);
+
+  // Sort within each layer by original secondary‑axis position
+  for (const layer of layers) {
+    layer.sort((a: any, b: any) => (isHorizontal ? (a.y ?? 0) - (b.y ?? 0) : (a.x ?? 0) - (b.x ?? 0)));
+  }
+
+  // Position nodes layer by layer
+  let primaryPos = 0;
+  for (const layer of layers) {
+    const secDims = layer.map((n: any) => (isHorizontal ? n.height : n.width));
+    const totalSec = secDims.reduce((s: number, d: number) => s + d, 0) + nodeSpacing * Math.max(layer.length - 1, 0);
+    let secPos = -totalSec / 2;
+
+    for (const node of layer) {
+      const d = isHorizontal ? node.height : node.width;
+      if (isHorizontal) { node.y = secPos; } else { node.x = secPos; }
+      secPos += d + nodeSpacing;
+    }
+    for (const node of layer) {
+      if (isHorizontal) { node.x = primaryPos; } else { node.y = primaryPos; }
+    }
+    const maxPri = Math.max(...layer.map((n: any) => (isHorizontal ? n.width : n.height)), 0);
+    primaryPos += maxPri + layerGap;
+  }
+
+  // Shift so that the minimum x,y starts at originPad
+  let minX = Infinity, minY = Infinity;
+  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); }
+  const offX = originPad - minX;
+  const offY = originPad - minY;
+  for (const n of nodes) { n.x += offX; n.y += offY; }
+}
+
+function layeredLayout(elements: any[], definition: string): void {
+  // ── Spacing constants ──
+  const INNER_NODE_SPACING = 60;   // Between nodes within a subgraph (secondary axis)
+  const INNER_LAYER_GAP = 80;      // Between layers within a subgraph (primary axis)
+  const SUBGRAPH_PADDING = 35;     // Padding inside subgraph rectangles
+  const HIGH_LEVEL_SPACING = 120;  // Between high‑level units on secondary axis
+  const HIGH_LEVEL_GAP = 120;      // Between high‑level layers on primary axis
+  const FLAT_NODE_SPACING = 80;    // For flat (no‑subgraph) diagrams
+  const FLAT_LAYER_GAP = 100;
+
+  const mainDir = parseMermaidDirection(definition);
+  const mainIsH = mainDir === "RIGHT" || mainDir === "LEFT";
 
   const byId = new Map<string, any>();
   for (const el of elements) byId.set(el.id, el);
 
   // ── 0. Identify subgraph rectangles ──
-  // Subgraph rectangles have groupIds containing "subgraph_group_<ID>"
-  // and their id matches the <ID> part.
   const subgraphIds = new Set<string>();
   const subgraphChildren = new Map<string, string[]>();
   for (const el of elements) {
     if (el.type === "rectangle" && el.groupIds?.length > 0) {
       for (const gid of el.groupIds) {
         const m = gid.match(/^subgraph_group_(.+)$/);
-        if (m && m[1] === el.id) {
-          subgraphIds.add(el.id);
-          break;
-        }
+        if (m && m[1] === el.id) { subgraphIds.add(el.id); break; }
       }
     }
   }
-  // Build subgraph -> children mapping
   for (const el of elements) {
     if (el.type === "rectangle" && !subgraphIds.has(el.id) && el.groupIds?.length > 0) {
       for (const gid of el.groupIds) {
@@ -635,122 +741,308 @@ function layeredLayout(elements: any[], definition: string): void {
     }
   }
 
-  // ── 1. Collect nodes (containers) and edges (arrows) ──
-  // Exclude subgraph rectangles from independent positioning
-  const nodes = elements.filter(
+  // ── Collect all content nodes and edges ──
+  const allContentNodes = elements.filter(
     (el) => el.type !== "arrow" && el.type !== "line" && !(el.type === "text" && el.containerId) && !subgraphIds.has(el.id),
   );
-  const edges = elements.filter(
+  const allEdges = elements.filter(
     (el) => (el.type === "arrow" || el.type === "line") && el.start?.id && el.end?.id,
   );
 
-  // ── 2. Build graph ──
-  const outEdges = new Map<string, string[]>();
-  const inDegree = new Map<string, number>();
-  for (const n of nodes) { outEdges.set(n.id, []); inDegree.set(n.id, 0); }
-  for (const e of edges) {
-    if (!outEdges.has(e.start.id)) outEdges.set(e.start.id, []);
-    outEdges.get(e.start.id)!.push(e.end.id);
-    inDegree.set(e.end.id, (inDegree.get(e.end.id) ?? 0) + 1);
+  // Map each content node → its parent subgraph (if any)
+  const nodeToSg = new Map<string, string>();
+  for (const [sgId, childIds] of subgraphChildren) {
+    for (const cid of childIds) nodeToSg.set(cid, sgId);
   }
 
-  // ── 3. Assign layers (topological BFS from sources) ──
-  const layerOf = new Map<string, number>();
-  const queue: string[] = [];
-  for (const [id, deg] of inDegree) {
-    if (deg === 0) { layerOf.set(id, 0); queue.push(id); }
-  }
-  if (queue.length === 0 && nodes.length > 0) {
-    layerOf.set(nodes[0].id, 0); queue.push(nodes[0].id);
-  }
-  // Track how many times each node has been processed to prevent infinite loops in cyclic graphs
-  const processCount = new Map<string, number>();
-  const maxProcessPerNode = nodes.length + 1; // Allow each node to be processed at most N+1 times
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    const count = (processCount.get(id) ?? 0) + 1;
-    processCount.set(id, count);
-    if (count > maxProcessPerNode) continue; // Skip if node has been processed too many times (cycle detected)
-    for (const tid of outEdges.get(id) ?? []) {
-      const nl = (layerOf.get(id) ?? 0) + 1;
-      if (!layerOf.has(tid) || (layerOf.get(tid) ?? 0) < nl) {
-        layerOf.set(tid, nl);
-        if (!queue.includes(tid)) queue.push(tid);
+  const hasSubgraphs = subgraphIds.size > 0;
+
+  if (!hasSubgraphs) {
+    // ── FLAT LAYOUT (no subgraphs) ──
+    // Same algorithm as before: single‑level layered layout
+    const nodes = allContentNodes;
+    const outEdges = new Map<string, string[]>();
+    const inDegree = new Map<string, number>();
+    for (const n of nodes) { outEdges.set(n.id, []); inDegree.set(n.id, 0); }
+    for (const e of allEdges) {
+      if (!outEdges.has(e.start.id)) outEdges.set(e.start.id, []);
+      outEdges.get(e.start.id)!.push(e.end.id);
+      inDegree.set(e.end.id, (inDegree.get(e.end.id) ?? 0) + 1);
+    }
+    const layerOf = new Map<string, number>();
+    const queue: string[] = [];
+    for (const [id, deg] of inDegree) {
+      if (deg === 0) { layerOf.set(id, 0); queue.push(id); }
+    }
+    if (queue.length === 0 && nodes.length > 0) {
+      layerOf.set(nodes[0].id, 0); queue.push(nodes[0].id);
+    }
+    const processCount = new Map<string, number>();
+    const maxProcessPerNode = nodes.length + 1;
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      const count = (processCount.get(id) ?? 0) + 1;
+      processCount.set(id, count);
+      if (count > maxProcessPerNode) continue;
+      for (const tid of outEdges.get(id) ?? []) {
+        const nl = (layerOf.get(id) ?? 0) + 1;
+        if (!layerOf.has(tid) || (layerOf.get(tid) ?? 0) < nl) {
+          layerOf.set(tid, nl);
+          if (!queue.includes(tid)) queue.push(tid);
+        }
       }
     }
-  }
-  for (const n of nodes) { if (!layerOf.has(n.id)) layerOf.set(n.id, 0); }
+    for (const n of nodes) { if (!layerOf.has(n.id)) layerOf.set(n.id, 0); }
+    const maxLayer = Math.max(...layerOf.values(), 0);
+    const layers: any[][] = Array.from({ length: maxLayer + 1 }, () => []);
+    for (const n of nodes) layers[layerOf.get(n.id) ?? 0].push(n);
+    for (const layer of layers) layer.sort((a: any, b: any) => (a.y ?? 0) - (b.y ?? 0));
 
-  const maxLayer = Math.max(...layerOf.values());
-  const layers: any[][] = Array.from({ length: maxLayer + 1 }, () => []);
-  for (const n of nodes) layers[layerOf.get(n.id) ?? 0].push(n);
-
-  // ── 4. Position nodes ──
-  for (const layer of layers) layer.sort((a: any, b: any) => (a.y ?? 0) - (b.y ?? 0));
-
-  let primaryPos = 0;
-
-  for (const layer of layers) {
-    const secDims = layer.map((n: any) => (isHorizontal ? n.height : n.width));
-    const totalSec = secDims.reduce((s: number, d: number) => s + d, 0) + NODE_SPACING * (layer.length - 1);
-
-    let secPos = -totalSec / 2;
-
-    for (const node of layer) {
-      const d = isHorizontal ? node.height : node.width;
-      if (isHorizontal) {
-        node.y = secPos;
-      } else {
-        node.x = secPos;
+    let primaryPos = 0;
+    for (const layer of layers) {
+      const secDims = layer.map((n: any) => (mainIsH ? n.height : n.width));
+      const totalSec = secDims.reduce((s: number, d: number) => s + d, 0) + FLAT_NODE_SPACING * (layer.length - 1);
+      let secPos = -totalSec / 2;
+      for (const node of layer) {
+        const d = mainIsH ? node.height : node.width;
+        if (mainIsH) { node.y = secPos; } else { node.x = secPos; }
+        secPos += d + FLAT_NODE_SPACING;
       }
-      secPos += d + NODE_SPACING;
+      for (const node of layer) {
+        if (mainIsH) { node.x = primaryPos; } else { node.y = primaryPos; }
+      }
+      const maxPri = Math.max(...layer.map((n: any) => (mainIsH ? n.width : n.height)), 0);
+      primaryPos += maxPri + FLAT_LAYER_GAP;
     }
 
-    for (const node of layer) {
-      if (isHorizontal) {
-        node.x = primaryPos;
-      } else {
-        node.y = primaryPos;
+    // Shift to (8,8)
+    let minX = Infinity, minY = Infinity;
+    for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); }
+    const offX = 8 - minX; const offY = 8 - minY;
+    for (const n of nodes) { n.x += offX; n.y += offY; }
+  } else {
+    // ── HIERARCHICAL LAYOUT (with subgraphs) ──
+
+    // ── Phase 1: Internal layout for each subgraph ──
+    for (const [sgId, childIds] of subgraphChildren) {
+      const children = childIds.map((id: string) => byId.get(id)).filter(Boolean);
+      if (children.length === 0) continue;
+
+      const sgDir = parseSubgraphDirection(sgId, definition);
+      const childIdSet = new Set(childIds);
+      const internalEdges = allEdges.filter(
+        (e: any) => childIdSet.has(e.start?.id) && childIdSet.has(e.end?.id),
+      );
+
+      layoutNodeGroup(children, internalEdges, sgDir, INNER_NODE_SPACING, INNER_LAYER_GAP, SUBGRAPH_PADDING);
+    }
+
+    // ── Phase 2: Calculate subgraph bounding boxes ──
+    const sgBounds = new Map<string, { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number }>();
+    for (const [sgId, childIds] of subgraphChildren) {
+      const children = childIds.map((id: string) => byId.get(id)).filter(Boolean);
+      if (children.length === 0) {
+        sgBounds.set(sgId, { minX: 0, minY: 0, maxX: 100, maxY: 100, width: 100, height: 100 });
+        continue;
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const c of children) {
+        minX = Math.min(minX, c.x);
+        minY = Math.min(minY, c.y);
+        maxX = Math.max(maxX, c.x + c.width);
+        maxY = Math.max(maxY, c.y + c.height);
+      }
+      const LABEL_HEIGHT = 25;
+      const w = (maxX - minX) + SUBGRAPH_PADDING * 2;
+      const h = (maxY - minY) + SUBGRAPH_PADDING * 2 + LABEL_HEIGHT;
+      sgBounds.set(sgId, { minX, minY, maxX, maxY, width: w, height: h });
+    }
+
+    // ── Phase 3: Build high‑level graph ──
+    // High‑level units: each subgraph + each standalone node
+    interface HighUnit {
+      id: string;
+      width: number;
+      height: number;
+      isSubgraph: boolean;
+      sgId?: string;       // for subgraph units
+      nodeId?: string;     // for standalone node units
+    }
+    const units: HighUnit[] = [];
+    const unitById = new Map<string, HighUnit>();
+
+    for (const sgId of subgraphIds) {
+      const bounds = sgBounds.get(sgId);
+      if (!bounds) continue;
+      const u: HighUnit = { id: sgId, width: bounds.width, height: bounds.height, isSubgraph: true, sgId };
+      units.push(u);
+      unitById.set(sgId, u);
+    }
+    const standaloneNodes = allContentNodes.filter((n: any) => !nodeToSg.has(n.id));
+    for (const n of standaloneNodes) {
+      const u: HighUnit = { id: n.id, width: n.width, height: n.height, isSubgraph: false, nodeId: n.id };
+      units.push(u);
+      unitById.set(n.id, u);
+    }
+
+    // Map each content node to its high‑level unit
+    const nodeToUnit = new Map<string, string>();
+    for (const [sgId] of subgraphChildren) {
+      const children = subgraphChildren.get(sgId) ?? [];
+      for (const cid of children) nodeToUnit.set(cid, sgId);
+    }
+    for (const n of standaloneNodes) nodeToUnit.set(n.id, n.id);
+
+    // Build high‑level edges
+    const hlOutEdges = new Map<string, string[]>();
+    const hlInDeg = new Map<string, number>();
+    for (const u of units) { hlOutEdges.set(u.id, []); hlInDeg.set(u.id, 0); }
+
+    const hlEdgeSet = new Set<string>(); // deduplicate
+    for (const e of allEdges) {
+      const srcUnit = nodeToUnit.get(e.start?.id);
+      const tgtUnit = nodeToUnit.get(e.end?.id);
+      if (!srcUnit || !tgtUnit || srcUnit === tgtUnit) continue;
+      const key = `${srcUnit}->${tgtUnit}`;
+      if (hlEdgeSet.has(key)) continue;
+      hlEdgeSet.add(key);
+      if (!hlOutEdges.has(srcUnit)) hlOutEdges.set(srcUnit, []);
+      hlOutEdges.get(srcUnit)!.push(tgtUnit);
+      hlInDeg.set(tgtUnit, (hlInDeg.get(tgtUnit) ?? 0) + 1);
+    }
+
+    // Topological BFS → high‑level layers
+    const hlLayerOf = new Map<string, number>();
+    const hlQueue: string[] = [];
+    for (const [id, deg] of hlInDeg) {
+      if (deg === 0) { hlLayerOf.set(id, 0); hlQueue.push(id); }
+    }
+    if (hlQueue.length === 0 && units.length > 0) {
+      hlLayerOf.set(units[0].id, 0); hlQueue.push(units[0].id);
+    }
+    const hlProcCount = new Map<string, number>();
+    const hlMaxProc = units.length + 1;
+    while (hlQueue.length > 0) {
+      const id = hlQueue.shift()!;
+      const c = (hlProcCount.get(id) ?? 0) + 1;
+      hlProcCount.set(id, c);
+      if (c > hlMaxProc) continue;
+      for (const tid of hlOutEdges.get(id) ?? []) {
+        const nl = (hlLayerOf.get(id) ?? 0) + 1;
+        if (!hlLayerOf.has(tid) || (hlLayerOf.get(tid) ?? 0) < nl) {
+          hlLayerOf.set(tid, nl);
+          if (!hlQueue.includes(tid)) hlQueue.push(tid);
+        }
+      }
+    }
+    for (const u of units) { if (!hlLayerOf.has(u.id)) hlLayerOf.set(u.id, 0); }
+
+    const hlMaxLayer = Math.max(...hlLayerOf.values(), 0);
+    const hlLayers: HighUnit[][] = Array.from({ length: hlMaxLayer + 1 }, () => []);
+    for (const u of units) hlLayers[hlLayerOf.get(u.id) ?? 0].push(u);
+
+    // Sort within each high‑level layer
+    for (const layer of hlLayers) {
+      layer.sort((a, b) => {
+        // Sort by original position of the first child / node
+        const aEl = a.isSubgraph ? byId.get(a.sgId!) : byId.get(a.nodeId!);
+        const bEl = b.isSubgraph ? byId.get(b.sgId!) : byId.get(b.nodeId!);
+        return mainIsH ? ((aEl?.y ?? 0) - (bEl?.y ?? 0)) : ((aEl?.x ?? 0) - (bEl?.x ?? 0));
+      });
+    }
+
+    // Position high‑level units layer by layer
+    let hlPrimaryPos = 0;
+    const unitPositions = new Map<string, { x: number; y: number }>();
+
+    for (const layer of hlLayers) {
+      const secDims = layer.map((u) => mainIsH ? u.height : u.width);
+      const totalSec = secDims.reduce((s, d) => s + d, 0) + HIGH_LEVEL_SPACING * Math.max(layer.length - 1, 0);
+      let secPos = -totalSec / 2;
+
+      for (const u of layer) {
+        const d = mainIsH ? u.height : u.width;
+        const pos = { x: 0, y: 0 };
+        if (mainIsH) {
+          pos.y = secPos;
+          pos.x = hlPrimaryPos;
+        } else {
+          pos.x = secPos;
+          pos.y = hlPrimaryPos;
+        }
+        unitPositions.set(u.id, pos);
+        secPos += d + HIGH_LEVEL_SPACING;
+      }
+
+      const maxPri = Math.max(...layer.map((u) => mainIsH ? u.width : u.height), 0);
+      hlPrimaryPos += maxPri + HIGH_LEVEL_GAP;
+    }
+
+    // ── Phase 4: Apply positions ──
+    // For standalone nodes: set position directly
+    for (const n of standaloneNodes) {
+      const pos = unitPositions.get(n.id);
+      if (pos) { n.x = pos.x; n.y = pos.y; }
+    }
+
+    // For subgraph children: shift from internal‑layout positions to absolute positions
+    for (const [sgId, childIds] of subgraphChildren) {
+      const pos = unitPositions.get(sgId);
+      if (!pos) continue;
+      const bounds = sgBounds.get(sgId);
+      if (!bounds) continue;
+
+      // The internal layout placed children starting at SUBGRAPH_PADDING offset.
+      // The high‑level unit's top‑left is at `pos`.
+      // Children's internal positions are relative to (0,0) with SUBGRAPH_PADDING offset.
+      // We need to shift them so that the subgraph's top‑left is at `pos`.
+      const shiftX = pos.x - 0; // internal layout starts at SUBGRAPH_PADDING, which maps to pos.x
+      const shiftY = pos.y - 0;
+
+      // But we need to account for the LABEL_HEIGHT at the top of the subgraph
+      const LABEL_HEIGHT = 25;
+
+      for (const cid of childIds) {
+        const child = byId.get(cid);
+        if (!child) continue;
+        child.x = child.x + shiftX;
+        child.y = child.y + shiftY + LABEL_HEIGHT;
       }
     }
 
-    const maxPri = Math.max(...layer.map((n: any) => (isHorizontal ? n.width : n.height)), 0);
-    primaryPos += maxPri + LAYER_GAP;
-  }
-
-  // ── 5. Shift entire diagram to start near (8, 8) ──
-  let minX = Infinity, minY = Infinity;
-  for (const n of nodes) {
-    minX = Math.min(minX, n.x);
-    minY = Math.min(minY, n.y);
-  }
-  const offX = 8 - minX;
-  const offY = 8 - minY;
-  for (const n of nodes) { n.x += offX; n.y += offY; }
-
-  // ── 5b. Position subgraph rectangles to wrap their children ──
-  for (const sgId of subgraphIds) {
-    const sgEl = byId.get(sgId);
-    if (!sgEl) continue;
-    const childIds = subgraphChildren.get(sgId) ?? [];
-    if (childIds.length === 0) continue;
-
-    let childMinX = Infinity, childMinY = Infinity;
-    let childMaxX = -Infinity, childMaxY = -Infinity;
-    for (const cid of childIds) {
-      const child = byId.get(cid);
-      if (!child) continue;
-      childMinX = Math.min(childMinX, child.x);
-      childMinY = Math.min(childMinY, child.y);
-      childMaxX = Math.max(childMaxX, child.x + child.width);
-      childMaxY = Math.max(childMaxY, child.y + child.height);
+    // Shift entire diagram to start near (8, 8)
+    let globalMinX = Infinity, globalMinY = Infinity;
+    for (const n of allContentNodes) {
+      globalMinX = Math.min(globalMinX, n.x);
+      globalMinY = Math.min(globalMinY, n.y);
     }
+    const gOffX = 8 - globalMinX;
+    const gOffY = 8 - globalMinY;
+    for (const n of allContentNodes) { n.x += gOffX; n.y += gOffY; }
 
-    const LABEL_HEIGHT = 25;
-    sgEl.x = childMinX - SUBGRAPH_PADDING;
-    sgEl.y = childMinY - SUBGRAPH_PADDING - LABEL_HEIGHT;
-    sgEl.width = (childMaxX - childMinX) + SUBGRAPH_PADDING * 2;
-    sgEl.height = (childMaxY - childMinY) + SUBGRAPH_PADDING * 2 + LABEL_HEIGHT;
+    // ── Phase 5: Position subgraph rectangles to wrap children ──
+    for (const sgId of subgraphIds) {
+      const sgEl = byId.get(sgId);
+      if (!sgEl) continue;
+      const childIds = subgraphChildren.get(sgId) ?? [];
+      if (childIds.length === 0) continue;
+
+      let cMinX = Infinity, cMinY = Infinity, cMaxX = -Infinity, cMaxY = -Infinity;
+      for (const cid of childIds) {
+        const child = byId.get(cid);
+        if (!child) continue;
+        cMinX = Math.min(cMinX, child.x);
+        cMinY = Math.min(cMinY, child.y);
+        cMaxX = Math.max(cMaxX, child.x + child.width);
+        cMaxY = Math.max(cMaxY, child.y + child.height);
+      }
+
+      const LABEL_HEIGHT = 25;
+      sgEl.x = cMinX - SUBGRAPH_PADDING;
+      sgEl.y = cMinY - SUBGRAPH_PADDING - LABEL_HEIGHT;
+      sgEl.width = (cMaxX - cMinX) + SUBGRAPH_PADDING * 2;
+      sgEl.height = (cMaxY - cMinY) + SUBGRAPH_PADDING * 2 + LABEL_HEIGHT;
+    }
   }
 
   // ── 6. Sync text positions ──
@@ -764,7 +1056,6 @@ function layeredLayout(elements: any[], definition: string): void {
         const te = byId.get(be.id);
         if (te) {
           te.x = node.x + node.width / 2 - te.width / 2;
-          // Subgraph labels: top-aligned; others: centered
           if (subgraphIds.has(node.id)) {
             const TOP_PADDING = 8;
             te.y = node.y + TOP_PADDING;
@@ -776,9 +1067,9 @@ function layeredLayout(elements: any[], definition: string): void {
     }
   }
 
-  // ── 7. Normalise arrow endpoints (intersectElementWithLine) ──
+  // ── 7. Normalise arrow endpoints ──
   const GAP = 2;
-  for (const arrow of edges) {
+  for (const arrow of allEdges) {
     const startEl = byId.get(arrow.start?.id);
     const endEl = byId.get(arrow.end?.id);
     if (!startEl || !endEl) continue;
@@ -803,7 +1094,7 @@ function layeredLayout(elements: any[], definition: string): void {
   }
 
   // ── 8. Add bidirectional arrow bindings to containers ──
-  for (const arrow of edges) {
+  for (const arrow of allEdges) {
     for (const endId of [arrow.start?.id, arrow.end?.id]) {
       if (!endId) continue;
       const el = byId.get(endId);
@@ -813,6 +1104,7 @@ function layeredLayout(elements: any[], definition: string): void {
     }
   }
 }
+
 
 // ── Font handling for PNG/SVG export ────────────────────
 
