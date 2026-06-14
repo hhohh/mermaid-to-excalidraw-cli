@@ -14,7 +14,11 @@
  */
 
 // ---- Polyfill browser APIs with jsdom BEFORE loading mermaid ----
+import { execSync } from "child_process";
+import { getDefaultFontBuffer } from "./defaultFont.js";
+import * as os from "os";
 import { JSDOM } from "jsdom";
+// Font embedding removed - using system font 平方萌萌哒
 
 function setupBrowserEnvironment(): void {
   const dom = new JSDOM("<!DOCTYPE html>", {
@@ -47,6 +51,8 @@ function setupBrowserEnvironment(): void {
   globalThis.KeyboardEvent = win.KeyboardEvent;
 
   // FontFace polyfill for @excalidraw/utils
+  // Load real font data for PingFangMengMeng
+  const fontFaces: any[] = [];
   if (typeof globalThis.FontFace === "undefined") {
     globalThis.FontFace = class FontFace {
       family: string;
@@ -55,6 +61,7 @@ function setupBrowserEnvironment(): void {
       status: string = "loaded";
       loaded: Promise<any>;
       unicodeRange: string = "U+0-10FFFF";
+      _fontData: ArrayBuffer | null = null;
       constructor(family: string, source: string, descriptors?: any) {
         this.family = family;
         this.source = source;
@@ -62,20 +69,36 @@ function setupBrowserEnvironment(): void {
         if (descriptors?.unicodeRange) {
           this.unicodeRange = descriptors.unicodeRange;
         }
-        this.loaded = Promise.resolve(this);
+        this.loaded = this._loadFont();
       }
-      load(): Promise<FontFace> { return Promise.resolve(this); }
+      async _loadFont(): Promise<FontFace> {
+        // Try to load Excalifont font data
+        if (this.family === "平方萌萌哒" && !this._fontData) {
+          try {
+            const fontPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "font", "PingFangMengMeng-2.ttf");
+            if (fs.existsSync(fontPath)) {
+              const fontBuffer = fs.readFileSync(fontPath);
+              this._fontData = fontBuffer.buffer.slice(fontBuffer.byteOffset, fontBuffer.byteOffset + fontBuffer.byteLength);
+            }
+          } catch (e) {
+            // Font loading failed, continue without font data
+          }
+        }
+        return this;
+      }
+      load(): Promise<FontFace> { return this.loaded; }
     } as any;
   }
 
   // document.fonts polyfill
   if (typeof document !== "undefined" && !(document as any).fonts) {
     (document as any).fonts = {
-      add: () => {},
+      add: (fontFace: any) => { fontFaces.push(fontFace); },
       check: () => true,
-      load: () => Promise.resolve([]),
-      ready: Promise.resolve([]),
-      forEach: () => {},
+      load: () => Promise.resolve(fontFaces),
+      ready: Promise.resolve(fontFaces),
+      forEach: (cb: any) => { fontFaces.forEach(cb); },
+      [Symbol.iterator]: () => fontFaces[Symbol.iterator](),
     };
   }
 
@@ -254,7 +277,7 @@ import { fileURLToPath } from "node:url";
 
 // ── Types ──────────────────────────────────────────────
 
-type OutputFormat = "excalidraw" | "excalidraw-md" | "png";
+type OutputFormat = "excalidraw" | "excalidraw-md" | "png" | "svg";
 
 type ExcalidrawFontFamily = number | string; // 1/2/3 or local font name
 
@@ -265,6 +288,7 @@ interface CliOptions {
   fontSize: number;
   fontFamily: ExcalidrawFontFamily;
   format: OutputFormat;
+  fontPath?: string;
   pretty: boolean;
   help: boolean;
   showVersion: boolean;
@@ -784,6 +808,329 @@ function layeredLayout(elements: any[], definition: string): void {
   }
 }
 
+// ── Font handling for PNG/SVG export ────────────────────
+
+
+// ── Browser detection for Playwright ────────────────────
+
+
+// ── Browser headless screenshot ────────────────────
+
+async function renderSvgToPngWithBrowser(svgString: string, outPath?: string): Promise<Buffer | void> {
+  const detected = detectSystemBrowser();
+  if (!detected) {
+    console.error("Error: No supported browser found (Chrome, Edge, or Firefox).");
+    console.error("Please install one of them to enable PNG export.");
+    process.exit(1);
+  }
+
+  console.error(`Using ${detected === "chrome" ? "Chrome" : detected === "msedge" ? "Edge" : "Firefox"} for PNG rendering...`);
+
+  // 从 SVG 中提取 viewBox 或 width/height
+  let svgWidth = 1920;
+  let svgHeight = 1080;
+  
+  const viewBoxMatch = svgString.match(/viewBox="([^"]+)"/);
+  if (viewBoxMatch) {
+    const parts = viewBoxMatch[1].split(/\s+/);
+    if (parts.length === 4) {
+      svgWidth = Math.ceil(parseFloat(parts[2]));
+      svgHeight = Math.ceil(parseFloat(parts[3]));
+    }
+  } else {
+    const widthMatch = svgString.match(/width="([^"]+)"/);
+    const heightMatch = svgString.match(/height="([^"]+)"/);
+    if (widthMatch) svgWidth = Math.ceil(parseFloat(widthMatch[1]));
+    if (heightMatch) svgHeight = Math.ceil(parseFloat(heightMatch[1]));
+  }
+  
+  // 添加一些边距
+  svgWidth += 40;
+  svgHeight += 40;
+
+  // 创建临时 HTML 文件
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mer2excal-"));
+  const tmpHtml = path.join(tmpDir, "diagram.html");
+  const tmpPng = path.join(tmpDir, "output.png");
+
+  const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 20px; padding: 0; background: white; }
+    svg { display: block; }
+  </style>
+  <script>
+    // 等待字体加载完成
+    document.fonts.ready.then(() => {
+      document.documentElement.classList.add('fonts-loaded');
+    });
+  </script>
+</head>
+<body>${svgString}</body>
+</html>`;
+
+  fs.writeFileSync(tmpHtml, htmlContent, "utf-8");
+
+  try {
+    // 获取浏览器可执行文件路径
+    const browserPath = getBrowserPath(detected);
+    if (!browserPath) {
+      throw new Error(`Could not find ${detected} executable`);
+    }
+
+    // 构建命令
+    let cmd: string;
+    if (detected === "firefox") {
+      // Firefox 的 headless 截图命令
+      cmd = `"${browserPath}" --headless --window-size=${svgWidth},${svgHeight} --screenshot "${tmpPng}" "${tmpHtml}"`;
+    } else {
+      // Chrome/Edge 的 headless 截图命令（使用新 headless 模式）
+      // 设置窗口大小以匹配 SVG 尺寸，添加 --run-all-compositor-stages-before-draw 确保字体渲染完成
+      // 使用 --force-device-scale-factor=2 提高分辨率（2倍缩放）
+      cmd = `"${browserPath}" --headless=new --disable-gpu --window-size=${svgWidth},${svgHeight} --force-device-scale-factor=2 --run-all-compositor-stages-before-draw --virtual-time-budget=5000 --screenshot="${tmpPng}" "file://${tmpHtml}"`;
+    }
+
+    execSync(cmd, { stdio: "pipe", timeout: 30000 });
+
+    // 读取生成的 PNG
+    if (!fs.existsSync(tmpPng)) {
+      throw new Error("Browser failed to generate PNG");
+    }
+
+    const pngBuffer = fs.readFileSync(tmpPng);
+
+    if (outPath) {
+      fs.writeFileSync(outPath, pngBuffer);
+      console.error(`✓ Written to ${outPath}`);
+    } else {
+      return pngBuffer;
+    }
+  } finally {
+    // 清理临时文件
+    try {
+      fs.unlinkSync(tmpHtml);
+      if (fs.existsSync(tmpPng)) fs.unlinkSync(tmpPng);
+      fs.rmdirSync(tmpDir);
+    } catch {}
+  }
+}
+
+function getBrowserPath(browser: "chrome" | "msedge" | "firefox"): string | null {
+  const platform = os.platform();
+  
+  const paths: Record<string, string[]> = {
+    chrome: platform === "darwin"
+      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+      : platform === "win32"
+      ? ["C:\Program Files\Google\Chrome\Application\chrome.exe", "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"]
+      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"],
+    msedge: platform === "darwin"
+      ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+      : platform === "win32"
+      ? ["C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
+      : ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"],
+    firefox: platform === "darwin"
+      ? ["/Applications/Firefox.app/Contents/MacOS/firefox"]
+      : platform === "win32"
+      ? ["C:\Program Files\Mozilla Firefox\firefox.exe", "C:\Program Files (x86)\Mozilla Firefox\firefox.exe"]
+      : ["/usr/bin/firefox"],
+  };
+
+  for (const p of paths[browser] || []) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+
+// ── Default font path ────────────────────────────────────
+
+function getDefaultFontPath(): string {
+  // 字体已嵌入到代码中，返回特殊标记
+  return "embedded";
+}
+
+function detectSystemBrowser(): "chrome" | "msedge" | "firefox" | null {
+  const platform = os.platform();
+
+  const browsers: Array<{ name: "chrome" | "msedge" | "firefox"; paths: string[] }> = [
+    {
+      name: "chrome",
+      paths: platform === "darwin"
+        ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+        : platform === "win32"
+        ? [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+          ]
+        : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"],
+    },
+    {
+      name: "msedge",
+      paths: platform === "darwin"
+        ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+        : platform === "win32"
+        ? [
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+          ]
+        : ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"],
+    },
+    {
+      name: "firefox",
+      paths: platform === "darwin"
+        ? ["/Applications/Firefox.app/Contents/MacOS/firefox"]
+        : platform === "win32"
+        ? [
+            "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+            "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
+          ]
+        : ["/usr/bin/firefox"],
+    },
+  ];
+
+  for (const browser of browsers) {
+    for (const p of browser.paths) {
+      if (fs.existsSync(p)) {
+        return browser.name;
+      }
+    }
+  }
+  return null;
+}
+
+
+function isFontFile(fontPath: string): boolean {
+  const ext = path.extname(fontPath).toLowerCase();
+  return ['.ttf', '.otf', '.woff', '.woff2', '.ttc'].includes(ext);
+}
+
+function getFontFamilyName(fontPath: string): string {
+  if (fontPath === "embedded") {
+    // 嵌入的字体名称
+    return "平方萌萌哒";
+  }
+  try {
+    const result = execSync(`fc-scan --format '%{family[0]}\\n' "${fontPath}"`, { encoding: "utf-8", timeout: 5000 });
+    const name = result.trim();
+    if (name) return name;
+  } catch {}
+  return "CustomFont";
+}
+
+
+
+function handleFontInSvg(svgString: string, fontSpec?: string): string {
+  // 情况 1: 未指定字体 → 使用系统回退 sans-serif
+  if (!fontSpec) {
+    return svgString;
+  }
+  
+  // 情况 2: 指定了字体（文件或嵌入）→ 嵌入到 SVG
+  if (fontSpec === "embedded" || isFontFile(fontSpec)) {
+    let fontBase64: string;
+    let absFontPath: string;
+    
+    if (fontSpec === "embedded") {
+      // 使用嵌入的字体
+      const fontBuffer = getDefaultFontBuffer();
+      fontBase64 = Buffer.from(fontBuffer).toString('base64');
+      absFontPath = "embedded";
+    } else {
+      // 使用外部字体文件
+      absFontPath = path.resolve(fontSpec);
+      if (!fs.existsSync(absFontPath)) {
+        console.error(`Warning: Font file not found: ${absFontPath}`);
+        return svgString;
+      }
+      const fontBuffer = fs.readFileSync(absFontPath);
+      fontBase64 = fontBuffer.toString('base64');
+    }
+    
+    try {
+      
+      // 确定字体格式
+      const fontFormat = absFontPath === "embedded" ? 'truetype' :
+                         absFontPath.endsWith('.woff2') ? 'woff2' : 
+                         absFontPath.endsWith('.woff') ? 'woff' : 
+                         absFontPath.endsWith('.otf') ? 'opentype' : 'truetype';
+      
+      // 确定 MIME 类型
+      const mimeType = fontFormat === 'woff2' ? 'font/woff2' :
+                       fontFormat === 'woff' ? 'font/woff' :
+                       fontFormat === 'opentype' ? 'font/otf' : 'font/ttf';
+      
+      // 生成 data URL（只嵌入一次）
+      const dataUrl = `data:${mimeType};base64,${fontBase64}`;
+      
+      // 获取真实字体名称
+      const realFontName = getFontFamilyName(absFontPath);
+      
+      // 生成 @font-face 规则（使用真实字体名称）
+      const fontFaceCss = `@font-face { font-family: "${realFontName}"; src: url("${dataUrl}") format("${fontFormat}"); }`;
+      
+      if (svgString.includes("<style")) {
+        svgString = svgString.replace(/<style([^>]*)>/, `<style$1>${fontFaceCss}`);
+      } else if (svgString.includes("</svg>")) {
+        svgString = svgString.replace("</svg>", `<defs><style>${fontFaceCss}</style></defs></svg>`);
+      }
+    } catch (e) {
+      console.error('Warning: Failed to embed font');
+    }
+    return svgString;
+  }
+  
+  // 情况 3: 指定了系统字体名 → 修改 font-family 属性
+  svgString = svgString.replace(/font-family="sans-serif"/g, `font-family="${fontSpec}"`);
+  return svgString;
+}
+
+// ── SVG generation (shared by PNG and SVG export) ────────────────────
+
+async function generateSvgString(
+  result: any,
+  opts: CliOptions,
+  definition: string,
+  exportToSvg: any,
+): Promise<string> {
+  const excalidrawData = buildExcalidrawJson(result.elements, result.files, opts.fontFamily, definition);
+  const svgElement = await exportToSvg({
+    ...excalidrawData,
+    skipInliningFonts: true,
+  });
+  let svgString = new XMLSerializer().serializeToString(svgElement);
+  
+  // 修复重复的 xmlns 属性
+  const xmlnsMatches = svgString.match(/xmlns="[^"]*"/g);
+  if (xmlnsMatches && xmlnsMatches.length > 1) {
+    const seen = new Set<string>();
+    svgString = svgString.replace(/xmlns="[^"]*"/g, (match) => {
+      if (seen.has(match)) return "";
+      seen.add(match);
+      return match;
+    });
+  }
+  
+  // 统一字体名称
+  let fontFamilyValue: string;
+  if (!opts.fontPath) {
+    fontFamilyValue = 'sans-serif';
+  } else if (opts.fontPath === "embedded" || isFontFile(opts.fontPath)) {
+    const realFamily = getFontFamilyName(opts.fontPath);
+    fontFamilyValue = `${realFamily}, sans-serif`;
+  } else {
+    fontFamilyValue = opts.fontPath;
+  }
+  svgString = svgString.replace(/font-family="[^"]*"/g, `font-family="${fontFamilyValue}"`);
+  
+  // 处理字体（嵌入或引用）
+  svgString = handleFontInSvg(svgString, opts.fontPath);
+  
+  return svgString;
+}
+
 // ── Output builders ───────────────────────────────────
 
 function buildExcalidrawJson(
@@ -845,7 +1192,8 @@ Arguments:
 Options:
   -o, --output <file>        Write output to file
   -d, --definition <str>     Inline Mermaid definition
-  -t, --format <type>        Output format: excalidraw (default) | excalidraw-md
+  -t, --format <type>        Output format: excalidraw (default) | excalidraw-md | png | svg
+  --font <path>              Font file path for SVG/PNG export (e.g., font/MyFont.ttf)
   --md                       Shortcut for --format excalidraw-md
   -f, --font-size <n>        Font size in px (default: 20)
   --font-family <id|name>    Font: 1=Virgil, 2=Helvetica, 3=Cascadia, or local name
@@ -888,11 +1236,14 @@ function parseArgs(): CliOptions {
       case "-p": case "--pretty": opts.pretty = true; break;
       case "--md": opts.format = "excalidraw-md"; break;
       case "--png": opts.format = "png"; break;
+      case "--svg": opts.format = "svg"; break;
+      case "--font": opts.fontPath = argv[++i]; break;
       case "-t": case "--format": {
         const val = argv[++i];
         if (val === "md" || val === "excalidraw-md") opts.format = "excalidraw-md";
         else if (val === "excalidraw") opts.format = "excalidraw";
         else if (val === "png") opts.format = "png";
+        else if (val === "svg") opts.format = "svg";
         else { console.error(`Unknown format: ${val}`); process.exit(1); }
         break;
       }
@@ -935,6 +1286,7 @@ function guessOutputPath(inputFile?: string, format?: OutputFormat): string | un
   let ext = ".excalidraw";
   if (format === "excalidraw-md") ext = ".excalidraw.md";
   else if (format === "png") ext = ".png";
+  else if (format === "svg") ext = ".svg";
   return path.join(p.dir, `${p.name}${ext}`);
 }
 
@@ -968,40 +1320,26 @@ async function convertSingleDiagram(
   });
 
   if (opts.format === "png") {
-    const excalidrawData = buildExcalidrawJson(result.elements, result.files, opts.fontFamily, definition);
-    const svgElement = await exportToSvg(excalidrawData);
-    let svgString = new XMLSerializer().serializeToString(svgElement);
+    // 复用 SVG 生成逻辑
+    const svgString = await generateSvgString(result, opts, definition, exportToSvg);
     
-    // 修复重复的 xmlns 属性
-    const xmlnsMatches = svgString.match(/xmlns="[^"]*"/g);
-    if (xmlnsMatches && xmlnsMatches.length > 1) {
-      const seen = new Set<string>();
-      svgString = svgString.replace(/xmlns="[^"]*"/g, (match) => {
-        if (seen.has(match)) return "";
-        seen.add(match);
-        return match;
-      });
+    // 使用 Playwright 渲染 SVG 为 PNG（支持 @font-face）
+    const pngBuffer = await renderSvgToPngWithBrowser(svgString, outPath);
+    if (!outPath && pngBuffer) {
+      process.stdout.write(pngBuffer);
     }
-    
-    // 使用 @resvg/resvg-wasm 转换为 PNG
-    const { Resvg, initWasm } = await import("@resvg/resvg-wasm");
-    // 初始化 WASM（从内置的 wasm 二进制加载）
-    const wasmUrl = "https://cdn.jsdelivr.net/npm/@resvg/resvg-wasm@2.6.2/index_bg.wasm";
-    const wasmResponse = await fetch(wasmUrl);
-    const wasmBytes = await wasmResponse.arrayBuffer();
-    await initWasm(wasmBytes);
-    
-    const resvg = new Resvg(svgString, {
-      fitTo: { mode: "original" },
-    });
-    const pngData = resvg.render();
-    const pngBuffer = pngData.asPng();
+    return;
+  }
+
+  if (opts.format === "svg") {
+    // 复用 SVG 生成逻辑
+    const svgString = await generateSvgString(result, opts, definition, exportToSvg);
     
     if (outPath) {
-      fs.writeFileSync(outPath, pngBuffer);
+      fs.writeFileSync(outPath, svgString, "utf-8");
       console.error(`✓ Written to ${outPath}`);
     } else {
-      process.stdout.write(pngBuffer);
+      console.log(svgString);
     }
     return;
   }
@@ -1044,7 +1382,7 @@ async function convertMarkdownFile(
   const outDir = path.join(p.dir, p.name);
   fs.mkdirSync(outDir, { recursive: true });
 
-  const ext = opts.format === "png" ? ".png" : ".excalidraw";
+  const ext = opts.format === "png" ? ".png" : opts.format === "svg" ? ".svg" : ".excalidraw";
   for (let i = 0; i < blocks.length; i++) {
     const num = String(i + 1).padStart(3, "0");
     const outPath = path.join(outDir, `${num}${ext}`);
@@ -1058,6 +1396,11 @@ async function convertMarkdownFile(
 
 async function main(): Promise<void> {
   const opts = parseArgs();
+
+  // 如果没有指定字体，使用默认字体
+  if (!opts.fontPath) {
+    opts.fontPath = getDefaultFontPath();
+  }
 
   if (opts.help) { printHelp(); return; }
   if (opts.showVersion) {

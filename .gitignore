@@ -6,3 +6,5 @@ mer2excal
 mer2excal-darwin-*
 .claude/
 test/
+font/
+*.exe
